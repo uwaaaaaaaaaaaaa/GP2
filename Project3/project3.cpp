@@ -10,8 +10,12 @@
 //2
 #define BOARD_WIDTH		(8)
 #define BOARD_HEIGHT	(8)
-#define MAX_MEMORIES 100000 	//AIが覚えられる最大の盤面数
+#define MAX_MEMORIES 50000 	//AIが覚えられる最大の盤面数
 #define MAX_TURNS 100		//AIが覚えられる最大のターン数
+#define MAX_HUMAN_MEMORIES 20000	//人間の手癖を覚えられる最大数
+#define HABIT_WEIGHT	(1.0)	//手癖の読みをQ値に対してどれだけ重視するか
+#define PASS_BONUS	(1.0)	//相手を封じた時のボーナス
+#define IMITATE_WEIGHT (0.7)	//人間の勝った局をどれだけ信用するか
 //3
 enum {
 	TURN_BLACK,
@@ -38,13 +42,15 @@ typedef struct {
 } BoardMemory;
 
 //AIの記憶データ（Qテーブル）
-BoardMemory qTable[MAX_MEMORIES];
-int qTableCount = 0;	//現在記憶している盤面の数
+BoardMemory qTable[2][MAX_MEMORIES];
+int qTableCount[2] = {0, 0};	//現在記憶している盤面の数
+int lastAiMemIndex = 0;		//最後に使った手の出し方を記録
 
 typedef struct {
 	int memIndex;		//盤面の記憶インデックス
 	int moveIndex;		//置いた場所
 	int player;			//誰のターンだったか
+	bool fromHuman;	//誰が打った手だったか
 } MoveHistory;
 
 //AIの記憶データ（ターン）
@@ -53,6 +59,32 @@ int historyCount = 0;
 
 int totalGames = 0;		//終了した時点での対局の総数
 int forcedPassCount[TURN_MAX] = { 0,0 };	//相手の順番を飛ばすことに成功した回数
+
+//人間の打ち方を覚えさせる構造
+typedef struct {
+	char state[65];
+	int moveCount[64];
+	int total;
+} HumanMemory;
+
+HumanMemory humanTable[2][MAX_HUMAN_MEMORIES];
+int humanTableCount[2] = {0, 0};
+
+//AIの教育係のレベル
+enum { STYLE_RANDOM, STYLE_GREEDY, STYLE_POSITION, STYLE_GHOST, STYLE_MAX };
+int opponentStyle = STYLE_RANDOM;
+
+//角が高く角の隣が低い評価表（かどとりの戦術用）
+const int posWieght[BOARD_HEIGHT][BOARD_WIDTH] = {
+	{ 100, -20,  10,   5,   5,  10, -20, 100 },
+	{ -20, -50,  -2,  -2,  -2,  -2, -50, -20 },
+	{  10,  -2,  -1,  -1,  -1,  -1,  -2,  10 },
+	{   5,  -2,  -1,  -1,  -1,  -1,  -2,   5 },
+	{   5,  -2,  -1,  -1,  -1,  -1,  -2,   5 },
+	{  10,  -2,  -1,  -1,  -1,  -1,  -2,  10 },
+	{ -20, -50,  -2,  -2,  -2,  -2, -50, -20 },
+	{ 100, -20,  10,   5,   5,  10, -20, 100 },
+};
 
 enum {
 	DIRECTION_UP,
@@ -318,15 +350,11 @@ void SelectMode() {
 
 //蓄積型AI用関数
 //盤面の状態を64文字の文字列に変換
-//claudeにアドバイスを求め、どちらのターンだったかを追加
-void GetBoardStateString(char* _outStr, int _turn) {
+void GetBoardStateString(char* _outStr) {
 	int index = 0;
-	_outStr[index++] = '0' + _turn;  // 手番を先頭に付与
-	for (int y = 0; y < BOARD_HEIGHT; y++) {
+	for(int y = 0;y < BOARD_HEIGHT; y++ ){
 		for (int x = 0; x < BOARD_WIDTH; x++) {
-			//boardの値を文字0,1,2に変換
-			_outStr[index] = '0' + board[y][x];
-			index++;
+			_outStr[index++] = '0' + board[y][x];
 		}
 	}
 	_outStr[64] = '\0';//配列の終わりを決めていないのでここでヌルを入れる
@@ -334,47 +362,123 @@ void GetBoardStateString(char* _outStr, int _turn) {
 
 //盤面文字列から記憶のインデックスを探す関数（見つからないときは新しく保存する）
 //対局数が増えて行くほど知識の応用ベースで動くように改修
-int GetOrAddMemoryIndex(const char* _stateStr) {
+//AIがどっちの色で操作してるのかも記憶できるように改修
+int GetOrAddMemoryIndex(int _color,const char* _stateStr) {
 	//すでに記憶があるか探す
-	for (int i = 0; i < qTableCount; i++) {
-		if (strcmp(qTable[i].state, _stateStr) == 0) {
-			qTable[i].visitCount++;
+	for (int i = 0; i < qTableCount[_color]; i++) {
+		if (strcmp(qTable[_color][i].state, _stateStr) == 0) {
+			qTable[_color][i].visitCount++;
 			return i;	//発見したらその番号を返す
 		}
 	}
 
 	//なければ新しく登録する
-	if (qTableCount < MAX_MEMORIES) {
-		int newIdx = qTableCount;
-		strcpy(qTable[newIdx].state, _stateStr);
+	if (qTableCount[_color] < MAX_MEMORIES) {
+		int newIdx = qTableCount[_color];
+		strcpy(qTable[_color][newIdx].state, _stateStr);
 		for (int i = 0; i < 64; i++) {
-			qTable[newIdx].qValues[i] = 0.0;//重みの初期値はすべて０
+			qTable[_color][newIdx].qValues[i] = 0.0;//重みの初期値はすべて０
 		}
-		qTable[newIdx].visitCount = 1;
-		qTableCount++;
+		qTable[_color][newIdx].visitCount = 1;
+		qTableCount[_color]++;
 		return newIdx;
 	}
 	//記憶容量が満タンなときは仮で０を返す
 	return 0;
 }
 
+//人間の手癖を学ぶための関数
+int GetOrAddHumanIndex(int _color, const char* _stateStr) {
+	//すでに記憶があるか探す
+	for (int i = 0; i < humanTableCount[_color]; i++) {
+		if (strcmp(humanTable[_color][i].state, _stateStr) == 0) {
+			return i;	//発見したらその番号を返す
+		}
+	}
+
+	//なければ新しく登録する
+	if (humanTableCount[_color] < MAX_HUMAN_MEMORIES) {
+		int newIdx = humanTableCount[_color];
+		strcpy(humanTable[_color][newIdx].state, _stateStr);
+		for (int i = 0; i < 64; i++) {
+			humanTable[_color][newIdx].moveCount[i] = 0;
+		}
+		humanTable[_color][newIdx].total = 0;
+		humanTableCount[_color]++;
+		return newIdx;
+	}
+	//記憶容量が満タンなときは-1を返す
+	return -1;
+}
+
+//戦ったデータの保存先を選択できるようにする
+const char* GetQTablePath() {
+	switch (mode)
+	{
+	case MODE_WATCH_AI:	return "q_self.dat";
+	case MODE_TRAIN_RANDOM: return (opponentStyle == STYLE_GHOST) ? "q_human.dat" : "q_random.dat";
+	default: return "q_human.dat";
+	}
+}
+
 //Qテーブルをファイルから読み込む
 void LoadQTable() {
-	FILE* fp = fopen("q_table.dat", "rb");
+	//モード切り替え時に前のデータが残らないように空にする
+	qTableCount[TURN_BLACK] = qTableCount[TURN_WHITE] = 0;
+	totalGames = 0;
+	FILE* fp = fopen(GetQTablePath(), "rb");
 	if (fp == NULL) return;//ファイルがなければスキップ
-	fread(&qTableCount, sizeof(int), 1, fp);
-	fread(qTable, sizeof(BoardMemory), qTableCount, fp);
+	fread(&totalGames, sizeof(int), 1, fp);
+	for (int c = 0; c < 2; c++) {
+		fread(&qTableCount[c], sizeof(int), 1, fp);
+		if (qTableCount[c] > MAX_MEMORIES) qTableCount[c] = MAX_MEMORIES;
+		fread(qTable[c], sizeof(BoardMemory), qTableCount[c], fp);
+
+	}
 	fclose(fp);
 }
 
 //Qテーブルをファイルに保存する
 void SaveQTable() {
-	FILE* fp = fopen("q_table.dat", "wb");
+	FILE* fp = fopen(GetQTablePath(), "wb");
 	if (fp == NULL) return;
-	fwrite(&qTableCount, sizeof(int), 1, fp);
-	fwrite(qTable, sizeof(BoardMemory), qTableCount, fp);
+	fwrite(&totalGames, sizeof(int), 1, fp);
+	for (int c = 0; c < 2; c++) {
+		fwrite(&qTableCount[c], sizeof(int), 1, fp);
+		fwrite(qTable[c], sizeof(BoardMemory), qTableCount[c], fp);
+	}
 	fclose(fp);
 
+}
+
+//人間の手癖のデータを読み込む
+void LoadHumanTable() {
+	humanTableCount[TURN_BLACK] = humanTableCount[TURN_WHITE] = 0;
+	FILE* fp = fopen("human_habit.dat", "rb");
+	if (fp == NULL) return;		//なかった時の措置
+	for (int c = 0; c < 2; c++) {
+		if (fread(&humanTableCount[c], sizeof(int), 1, fp) != 1) {
+			humanTableCount[c] = 0;
+			break;
+		}
+		if (humanTableCount[c] < 0 || humanTableCount[c] > MAX_HUMAN_MEMORIES) {
+			humanTableCount[c] = 0;
+			break;
+		}
+		fread(humanTable[c], sizeof(HumanMemory), humanTableCount[c], fp);
+	}
+	fclose(fp);
+}
+
+//人間の手癖のデータを保存する
+void SaveHumanTable() {
+	FILE* fp = fopen("human_habit.dat", "wb");
+	if (fp == NULL) return;
+	for (int c = 0; c < 2; c++) {
+		fwrite(&humanTableCount[c], sizeof(int), 1, fp);
+		fwrite(humanTable[c], sizeof(HumanMemory), humanTableCount[c], fp);
+	}
+	fclose(fp);
 }
 
 //ゲーム終了時に勝敗結果からQ値を更新する
@@ -388,36 +492,48 @@ void LearnFromGame(int winner) {
 	}
 
 	//対局数が少ないほど報酬を多くする
-	double earlyGameBonus = 1.0 + 1.0 / (totalGames * 0.65);
-
+	double earlyGameBonus = 1.0 + 1.0 / (1.0 + totalGames * 0.05);
+	//終局時の空きマス数を記録
+	int emptyCount = 64 - GetDiskCount(TURN_BLACK) - GetDiskCount(TURN_WHITE);
+	//早期決着ほど結果の重みを大きくする
+	double speedFactor = 1.0 + emptyCount * 0.03;
+	if (speedFactor > 2.0) speedFactor = 2.0;
 	for (int i = 0; i < historyCount; i++) {
 		int mIdx = gameHistory[i].memIndex;
 		int posIdx = gameHistory[i].moveIndex;
 		int p = gameHistory[i].player;
+		
+		//人間が勝った局の手だけ真似する
+		if (gameHistory[i].fromHuman && winner != p) continue;
 
 		//報酬の設定
 		double reward = 0.0;
 		if (winner == p) {
-			reward = 1.0;	//勝ち
+			reward = 1.0;	//勝てば報酬追加
+			//相手のターンを飛ばした分だけ追加報酬
+			int passBonusCount = forcedPassCount[p];
+			if (passBonusCount > 5) passBonusCount = 5;		//報酬の上限
+			reward += passBonusCount * 0.2;
+			reward *= speedFactor;		//早く勝つほど値が大きくなる
 		}
 		else if (winner == TURN_NONE) {
-			reward = 0.0;	//引き分け
+			reward = 0.0;	//引き分けはなし
 		}
 		else {
-			reward = -1.0;	//負け
+			reward = -1.0 * speedFactor;	//負ければその分減点
 		}
 
-		//相手のターンを飛ばした分だけ追加報酬
-		reward += forcedPassCount[p] * 0.1;
+		//人間の手はAI自身の判断より弱めに使う
+		if (gameHistory[i].fromHuman) reward *= IMITATE_WEIGHT;
 
 		//対局数が少ないほど報酬が顕著に上がるようにする
 		reward *= earlyGameBonus;
 
 		//訪問回数が多い過去データほどノイズを下げ過去のデータを利用しやすくする
-		double alpha = baseAlpha / (1.0 + qTable[mIdx].visitCount * 0.01);
+		double alpha = baseAlpha / (1.0 + qTable[p][mIdx].visitCount * 0.01);
 
-		double currentQ = qTable[mIdx].qValues[posIdx];
-		qTable[mIdx].qValues[posIdx] += baseAlpha * (reward - currentQ);
+		double currentQ = qTable[p][mIdx].qValues[posIdx];
+		qTable[p][mIdx].qValues[posIdx] += alpha * (reward - currentQ);
 	}
 
 	//次のゲームのために履歴をリセット
@@ -429,12 +545,140 @@ void LearnFromGame(int winner) {
 	SaveQTable();
 }
 
+//手癖テーブルから盤面を探す(なければ-1を返し、追加しない)
+int FindHumanIndex(int _color, const char* _stateStr) {
+	for (int i = 0; i < humanTableCount[_color]; i++) {
+		if (strcmp(humanTable[_color][i].state, _stateStr) == 0) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+//盤面の良さを_me始点で評価する(石差＋角とれてるか)
+double EvalBoard(int _me) {
+	double diff = (GetDiskCount(_me) - GetDiskCount(_me ^ 1)) / 64.0;	//石の差はどのくらいか
+	double corner = 0.0;	//角がいくつとれてるか
+	int cx[4] = { 0, BOARD_WIDTH - 1, 0, BOARD_WIDTH - 1 };
+	int cy[4] = {0, 0, BOARD_HEIGHT - 1, BOARD_HEIGHT -1};
+	for (int i = 0; i < 4; i ++) {
+		int c = board[cy[i]][cx[i]];
+		if (c == _me) corner += 0.25;	//自分の石が角にあれば評価アップ
+		else if (c == (_me ^ 1)) corner -= 0.25;	//相手の石であれば評価が同値ダウン
+	}
+	return diff + corner;
+}
+
+//自分（ＡＩ）が出そうとしている手が人間の癖を踏まえてどれだけ得か
+double EvaluateHabit(int _color, VEC2 _pos) {
+	int opp = _color ^ 1;
+	int saved[BOARD_HEIGHT][BOARD_WIDTH];
+	memcpy(saved, board, sizeof(board));	//本番の盤面をいったん退避
+
+	//試し打ちで検証
+	CheckCanPlace(_color, _pos, true);
+	board[_pos.y][_pos.x] = _color;
+
+	double score = 0.0;
+	if (!CheckCanPlaceAll(opp)) {
+		score = PASS_BONUS + EvalBoard(_color);		//相手が打てない＝パスさせることができる
+	}
+	else {
+		char s[65];
+		GetBoardStateString(s);
+		int idx = FindHumanIndex(opp, s);
+		if (idx >= 0 && humanTable[opp][idx].total > 0) {
+			HumanMemory* hm = &humanTable[opp][idx];
+			int afterMove[BOARD_HEIGHT][BOARD_WIDTH];
+			memcpy(afterMove, board, sizeof(board));
+
+			double sum = 0.0;
+			for (int m = 0; m < 64; m++) {
+				if (hm->moveCount[m] == 0)continue;
+				VEC2 rp = { m % BOARD_WIDTH, m / BOARD_WIDTH };
+				if (!CheckCanPlace(opp, rp)) continue;
+
+				//人間の返しを予測して打ってみる
+				double w = (double)hm->moveCount[m] / hm->total;	//予測したてが選ばれる割合を計算
+				CheckCanPlace(opp, rp, true);
+				board[rp.y][rp.x] = opp;
+				sum += w * EvalBoard(_color);
+				memcpy(board, afterMove, sizeof(board));	//返し手を打つ前に戻す
+			}
+			//データが少ない内は信用しない(5回で信用)
+			double confidence = (hm->total >= 5) ? 1.0 : hm->total / 5.0;
+			score = sum * confidence;
+		}
+	}
+	memcpy(board, saved, sizeof(board));	//本番の盤面を復元
+	return score;
+}
+
+//AIが打った時に返せる石の数
+int CountFlips(int _color, VEC2 _pos) {
+	int saved[BOARD_HEIGHT][BOARD_WIDTH];
+	memcpy(saved, board, sizeof(board));		//打つ前の盤面を保存
+	int before = GetDiskCount(_color);
+	CheckCanPlace(_color, _pos, true);
+	int after = GetDiskCount(_color);
+	memcpy(board, saved, sizeof(board));		//打った後の盤面を保存
+	return after - before;	//色の差を返す
+}
+
+//相手役の手を選ぶ
+VEC2 SelectOpponentMove(int _color) {
+	VEC2 moves[64];
+	int n = 0;
+	for (int y = 0; y < BOARD_HEIGHT; y++) {
+		for(int x = 0; x < BOARD_WIDTH; x++) {
+			VEC2 pos = { x, y };
+			if (CheckCanPlace(_color, pos)) moves[n++] = pos;
+		}
+	}
+
+	//ランダムで返す手
+	if (opponentStyle == STYLE_RANDOM) return moves[rand() % n];
+
+	//手癖テーブルと一致すれば人間の手癖で対局する
+	if (opponentStyle == STYLE_GHOST) {
+		char s[65];
+		GetBoardStateString(s);
+		int idx = FindHumanIndex(_color, s);
+		if (idx >= 0 && humanTable[_color][idx].total > 0) {
+			int r = rand() % humanTable[_color][idx].total;
+			for (int m = 0; m < 64; m++) {
+				r -= humanTable[_color][idx].moveCount[m];
+				if (r < 0) {
+					VEC2 p = { m % BOARD_WIDTH, m / BOARD_WIDTH };
+				}
+			}
+		}
+	}
+
+	//人間の手癖が見つからなければ位置重視で打つ
+	int best = 0;
+	double bestScore = -1e9;
+
+	for (int i = 0; i < n; i++) {
+		double sc;
+		if (opponentStyle == STYLE_POSITION) sc = posWieght[moves[i].y][moves[i].x];
+		else sc = CountFlips(_color, moves[i]);
+		sc += (rand() % 100) / 100.0;	//スコアが同じものがあればランダムで選ぶ
+		if (sc > bestScore) { 
+			bestScore = sc; 
+			best = i; 
+		}
+	}
+	return moves[best];
+	}
+
 //AIの手を決定する関数
 VEC2 SelectAiMove(int _color) {
 	//現在の盤面から、記憶テーブルのインデックスを取得
 	char stateStr[65];
-	GetBoardStateString(stateStr, _color);
-	int memIdx = GetOrAddMemoryIndex(stateStr);
+	GetBoardStateString(stateStr);
+	int memIdx = GetOrAddMemoryIndex(_color, stateStr);
+	lastAiMemIndex = memIdx;	//履歴記録用に覚えておく
 
 	//置ける場所をリストアップ
 	VEC2 vaildMoves[64];
@@ -469,10 +713,12 @@ VEC2 SelectAiMove(int _color) {
 		for (int i = 0; i < validCount; i++) {
 			VEC2 pos = vaildMoves[i];
 			int boardIdx = pos.y * BOARD_WIDTH + pos.x;		//(x,y)を0~63の１次元インデックスに変換
-			double q = qTable[memIdx].qValues[boardIdx];
-
-			if (q > maxQ) {
-				maxQ = q;
+			double score = qTable[_color][memIdx].qValues[boardIdx];
+			if (mode == MODE_1P) {
+				score += HABIT_WEIGHT * EvaluateHabit(_color, pos);
+			}
+			if (score > maxQ) {
+				maxQ = score;
 				bestIdx = i;
 			}
 		}
@@ -481,16 +727,21 @@ VEC2 SelectAiMove(int _color) {
 }
 //なんかもうめんどくさくなってコピペ
 int main() {
-	//過去のデータを読み込み
-	LoadQTable();
+	int aiWins = 0;
+	int aiGames = 0;
 start:
 	historyCount = 0;
 	srand((unsigned int)time(NULL));
 	SelectMode();
+	LoadQTable();
+	LoadHumanTable();
 	//対戦回数のための変数
 	int trainMatchTarget = 1;
 	//AIvsRANDOMかAIvsAIのときに入力させる文
 	if (mode == MODE_WATCH_AI || mode == MODE_TRAIN_RANDOM) {
+		printf("相手　0:ランダム 1:グリーディ 2:位置重視 3:ゴースト");
+		scanf("%d", &opponentStyle);
+		while (getchar() != '\n');
 		printf("対戦させる回数を入力してください: ");
 		scanf("%d", &trainMatchTarget);
 		while (getchar() != '\n');  // ★scanfの後に残る改行を掃除(conioとの衝突防止)
@@ -501,6 +752,7 @@ start:
 		Init();
 
 		if (mode == MODE_1P || mode == MODE_TRAIN_RANDOM) {
+			if (opponentStyle < 0 || opponentStyle >= STYLE_MAX) opponentStyle = STYLE_RANDOM;
 			bool playerIsBlack = (rand() % 2 == 0);
 			isPlayer[TURN_BLACK] = playerIsBlack;	//1P→プレイヤー、RANDOM→CPU
 			isPlayer[TURN_WHITE] = !playerIsBlack;
@@ -508,7 +760,6 @@ start:
 
 		while (1) {
 			if (!CheckCanPlaceAll(turn)) {
-				forcedPassCount[turn ^ 1]++;
 				turn ^= 1;
 				if (!CheckCanPlaceAll(turn)) {
 					turn = TURN_NONE;
@@ -521,6 +772,12 @@ start:
 					else if (blackCount < whiteCount) winner = TURN_WHITE;
 
 					LearnFromGame(winner);
+					//AIの勝率表示
+					int aiColor = isPlayer[TURN_BLACK] ? TURN_WHITE : TURN_BLACK;
+					aiGames++;
+					if (winner == aiColor) aiWins++;
+					printf("AI勝率：%.1f%%(%d勝/%d局)\n", 100.0 * aiWins / aiGames, aiWins, aiGames);
+					if (mode == MODE_1P) SaveHumanTable();
 					printf("%d / %d 局終了\n", matchNum + 1, trainMatchTarget);
 
 					if (mode != MODE_WATCH_AI && mode != MODE_TRAIN_RANDOM) {
@@ -528,6 +785,7 @@ start:
 					}
 					break;  // ★goto startではなくforループの次の対局へ
 				}
+				forcedPassCount[turn]++;
 				continue;
 			}
 
@@ -546,20 +804,9 @@ start:
 				}
 			}
 			else {
-				DrawScreen();
+				//DrawScreen();
 				if (mode == MODE_TRAIN_RANDOM && isPlayer[turn]) {
-					VEC2 validMoves[64];
-					int validCount = 0;
-					for (int y = 0; y < BOARD_HEIGHT; y++) {
-						for (int x = 0; x < BOARD_WIDTH; x++) {
-							VEC2 pos = { x, y };
-							if (CheckCanPlace(turn, pos)) {
-								validMoves[validCount] = pos;
-								validCount++;
-							}
-						}
-					}
-					placePosition = validMoves[rand() % validCount];
+					placePosition = SelectOpponentMove(turn);
 				}
 				else {
 					placePosition = SelectAiMove(turn);
@@ -567,12 +814,34 @@ start:
 				}
 			}
 
-			if (isAiTurn && historyCount < MAX_TURNS) {
+			if (mode == MODE_1P && isPlayer[turn]) {
 				char stateStr[65];
-				GetBoardStateString(stateStr, turn);
-				gameHistory[historyCount].memIndex = GetOrAddMemoryIndex(stateStr);
+				GetBoardStateString(stateStr);
+				int moveIdx = placePosition.y * BOARD_WIDTH + placePosition.x;
+
+				//手癖の記録
+				int idx = GetOrAddHumanIndex(turn, stateStr);
+				if (idx >= 0) {
+					int moveIdx = placePosition.y * BOARD_WIDTH + placePosition.x;
+					humanTable[turn][idx].moveCount[moveIdx]++;
+					humanTable[turn][idx].total++;
+				}
+
+				//人間の手も履歴へ入れる（必勝法の真似）
+				if (historyCount < MAX_TURNS) {
+					gameHistory[historyCount].memIndex = GetOrAddMemoryIndex(turn, stateStr);
+					gameHistory[historyCount].moveIndex = moveIdx;
+					gameHistory[historyCount].player = turn;
+					gameHistory[historyCount].fromHuman = true;
+					historyCount++;
+				}
+			}
+
+			if (isAiTurn && historyCount < MAX_TURNS) {
+				gameHistory[historyCount].memIndex = lastAiMemIndex;
 				gameHistory[historyCount].moveIndex = placePosition.y * BOARD_WIDTH + placePosition.x;
 				gameHistory[historyCount].player = turn;
+				gameHistory[historyCount].fromHuman = false;
 				historyCount++;
 			}
 
