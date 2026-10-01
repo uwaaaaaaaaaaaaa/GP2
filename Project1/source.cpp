@@ -6,6 +6,11 @@
 #include <string.h>
 //[2]定数を定義する場所
 #define SPELL_COST 3
+#define MAP_WIDTH	16
+#define MAP_HEIGHT	16
+#define SCREEN_WIDTH 16
+#define SCREEN_HEIGHT 12
+
 //[3]列挙定数を定義する場所
 //[3-1]モンスターの種類を定義する
 enum {
@@ -29,6 +34,15 @@ enum {
 	COMMAND_RUN, //[3-3-3]逃げる
 	COMMAND_MAX		 //[3-3-4]コマンドの種類の数
 };
+
+//3-4
+enum {
+	MAP_FIELD,
+	MAP_KING_CATSLE,
+	MAP_BOSS_CATSLE,
+	MAP_MAX,
+};
+
 //[4]構造体を定義する場所
 
 //[4-1]キャラクターの構造体を定義する
@@ -86,6 +100,10 @@ CHARACTER monsters[MONSTER_MAX] = {
 }
 };
 
+int currentMap;
+int playerX = 6;
+int playerY = 12;
+
 //[5-2]キャラクターの配列を宣言する
 CHARACTER characters[MONSTER_MAX];
 
@@ -95,12 +113,71 @@ char commandNames[COMMAND_MAX][4 * 2 + 1] = {
 	"じゅもん", //[5-3-2]COMMAND_SPELL
 	"にげる"  //[5-3-3]COMMAND_RUN
 };
+
+//5-4
+char map[MAP_MAX][MAP_HEIGHT][MAP_WIDTH + 1] = {
+	{
+		"~~~~~~~~~~~~~~~~",
+		"~~MMMMM~~MMMM.~~",
+		"~M...M.##..M...~",
+		"~M.M.M.~~M.M.M.~",
+		"~M.M...~~M...M.~",
+		"~M.MMMM~~MMMM..~",
+		"~M..MM.~~~~~~#~~",
+		"~~~~M.M.~~~~~#~~",
+		"~~M.MM~~~~BMM..~",
+		"~~...MM..M.MMM.~",
+		"~...~~M~~M...M.~",
+		"~..~~~KMMMMM.M.~",
+		"~~~~.....M...M.~",
+		"~...~~~..M.MM..~",
+		"~~....~.......~~",
+		"~~~~~~~~~~~~~~~~"
+	},
+	{
+		"HHH.......HHH",
+		"H.H..... .H.H",
+		"HHHHHHHHHHHHH",
+		".H.........H.",
+		".H.HHH.HHH.H.",
+		".H.H0H.H1H.H.",
+		".H.........H.",
+		".HW.......WH.",
+		".HY.......YH.",
+		"HHHHHH.HHHHHH",
+		"H.H~~~#~~~H.H",
+		"HHH~~~#~~~HHH",
+		"............."
+	},
+	{
+		"HHH.......HHH",
+		"H.H.......H.H",
+		"HHHHHHHHHHHHH",
+		".H....H....H.",
+		".H..WHHHW..H.",
+		".H..YH2HY..H.",
+		".H.........H.",
+		".H..W...W..H.",
+		".H..Y...Y..H.",
+		".H.........H.",
+		"HHHHHH.HHHHHH",
+		"H.H~~~#~~~H.H",
+		"HHH~~~#~~~HHH",
+		"~~~~~~#~~~~~~",
+		"~~~~~~#~~~~~~",
+		"............."
+	},
+};
 //[6]関数を宣言する場所
 
 //[6-1]ゲームを初期化する関数を宣言する
 void Init() {
 	//[6-1-1]プレイヤーの配列を初期化する
 	characters[MONSTER_PLAYER] = monsters[CHARACTER_PLAYER];
+	currentMap = MAP_KING_CATSLE;
+
+	playerX = 4;
+	playerY = 6;
 };
 
 //[6-2]戦闘シーンを描画する関数を宣言する
@@ -261,6 +338,48 @@ void Battle(int _monster) {
 	}
 }
 
+//6-5
+void DrawMap() {
+	system("cls");
+	printf("%s\n", characters[CHARACTER_PLAYER].name);
+	printf("HP:%d/%d MP:%d/%d\n", characters[CHARACTER_PLAYER].hp,
+		characters[CHARACTER_PLAYER].maxHp, characters[CHARACTER_PLAYER].mp,
+		characters[CHARACTER_PLAYER].maxMp);
+	printf("\n");
+	for (int y = playerY - SCREEN_HEIGHT / 2; y < playerY + SCREEN_HEIGHT / 2; y++) {
+		for (int x = playerX - SCREEN_WIDTH / 2; x < playerX + SCREEN_WIDTH / 2; x++) {
+			if ((x == playerX) && (y == playerY)) {
+				printf("勇");
+			}
+			else if ((x < 0) || (x >= MAP_WIDTH) || (y<0) || (y >= MAP_HEIGHT) || (map[currentMap][y][x] == '\0')) {
+				switch (currentMap)
+				{
+				case MAP_FIELD: printf("～"); break;
+				case MAP_KING_CATSLE: printf(". "); break;
+				case MAP_BOSS_CATSLE: printf(". "); break;
+				}
+			}
+			else{
+				switch (map[currentMap][y][x]) {
+				case '~': printf("～"); break;
+				case '.': printf("．"); break;
+				case 'M': printf("Ｍ"); break;
+				case '#': printf("＃"); break;
+				case 'K': printf("王"); break;
+				case 'B': printf("魔"); break;
+				case 'H': printf("□"); break;
+				case 'W': printf("炎"); break;
+				case 'Y': printf("Ｙ"); break;
+				case '0': printf("王"); break;
+				case '1': printf("姫"); break;
+				case '2': printf("魔"); break;
+				}
+			}
+		}
+		printf("\n");
+	}
+}
+
 //[6-6]プログラムの実行開始点を宣言する
 int main() {
 	srand((unsigned int)time(NULL));
@@ -268,8 +387,98 @@ int main() {
 	//[6-6-2]ゲームを初期化する関数を呼び出す
 	Init();
 
-	//[6-6-3]戦闘シーンの関数を呼び出す
-	Battle(MONSTER_SLIME);
-	Battle(MONSTER_BOSS);
+	//メインループ
+	while (1) {
+		
+		DrawMap();
+		int lastPlayerX = playerX;
+		int lastPlayerY = playerY;
+		switch (_getch()) {
+		case'w': playerY--; break;
+		case's': playerY++; break;
+		case'a': playerX--; break;
+		case'd': playerX++; break;
+		}
+		
+		printf("\n");
+
+		if((playerX < 0) || (playerX >= MAP_WIDTH)
+			|| (playerY < 0) || (playerY >= MAP_HEIGHT)
+			|| (map[currentMap][playerY][playerX] == '\0')) {
+			switch (currentMap)
+			{
+			case MAP_KING_CATSLE: 
+				currentMap = MAP_FIELD;
+
+				playerX = 6;
+				playerY = 12;
+				break;
+			case MAP_BOSS_CATSLE:
+				currentMap = MAP_FIELD;
+				
+				playerX = 10;
+				playerY = 9;
+				break;
+			}
+		}
+
+		switch (map[currentMap][playerY][playerX])
+		{
+		case 'K':
+			currentMap = MAP_KING_CATSLE;
+
+			playerX = 6;
+			playerY = 12;
+			break;
+		case 'B':
+			currentMap = MAP_BOSS_CATSLE;
+			playerX = 6;
+			playerY = 15;
+			break;
+		case '0':
+			printf("*「おお、ゆうしゃよ！\n""ひがしの　まじょうの　まおうを\n""たおし　せかいを	すくってくれ！\n");
+			_getch();
+			break;
+		case '1':
+			printf("かみに　いのりをささげます。\n""おお　かみよ！\n""ゆうしゃさまに　しゅくふくを！\n");
+			characters[CHARACTER_PLAYER].hp = characters[CHARACTER_PLAYER].maxHp;
+			characters[CHARACTER_PLAYER].mp = characters[CHARACTER_PLAYER].maxMp;
+			_getch();
+			break;
+
+		case '2':
+			printf("*「おろかな　にんげんよ！\n""わが　やぼうを　はばむものは\n""このよから　けしさってくれる！\n");
+			Battle(MONSTER_BOSS);
+			_getch();
+			if (characters[CHARACTER_MONSTER].hp <= 0) {
+				system("cls");
+				printf("まおうは　たおされた。\n""せかいは　めつぼうの　ききから　すくわれたが、\n""そのご　ゆうしゃを　みたものは　いないという\n""T H E  E N D");
+				return 0;
+			}
+		break;
+		}
+
+		switch (map[currentMap][playerY][playerX])
+		{
+		case'.':
+		case'#':
+			if ((currentMap == MAP_FIELD) && (rand() % 16 == 0)) {
+				Battle(MONSTER_SLIME);
+			}
+			break;
+		default:
+			playerX = lastPlayerX;
+			playerY = lastPlayerY;
+			break;
+		}
+
+		if (characters[CHARACTER_PLAYER].hp <= 0) {
+			Init();
+			DrawMap();
+
+			printf("＊「おお　ゆうしゃよ！\n""かみが　そなたを　すくわれた！\n""ゆうしゃに　えいこうあれ！\n");
+			_getch();
+		}
+	}
 	
 }
